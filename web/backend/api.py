@@ -8,7 +8,6 @@ import logging
 import os
 import json
 import re
-import shutil
 from datetime import datetime
 from typing import Optional
 from pathlib import Path
@@ -39,7 +38,19 @@ from codex_session_patcher.core import (
 )
 from codex_session_patcher.core.patcher import clean_session_jsonl, save_session_jsonl
 from codex_session_patcher.core.sqlite_adapter import OpenCodeDBAdapter, DEFAULT_OPENCODE_DB
+from codex_session_patcher.config import (
+    DEFAULT_CONFIG_FILE,
+    load_config as load_shared_config,
+    save_config as save_shared_config,
+)
+from codex_session_patcher.file_ops import (
+    atomic_write_bytes,
+    atomic_write_text,
+    create_unique_backup,
+    require_regular_or_missing,
+)
 from codex_session_patcher import __version__
+from .security import is_allowed_origin, is_loopback_host
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +60,6 @@ router = APIRouter()
 DEFAULT_SESSION_DIR = os.path.expanduser("~/.codex/sessions/")
 DEFAULT_CLAUDE_SESSION_DIR = os.path.expanduser("~/.claude/projects/")
 DEFAULT_MEMORY_FILE = os.path.expanduser("~/.codex/memories/MEMORY.md")
-DEFAULT_CONFIG_FILE = os.path.expanduser("~/.codex-patcher/config.json")
 
 COOPERATION_TYPE_LABELS = {
     "ads": "广告位出租",
@@ -574,9 +584,7 @@ def patch_session(file_path: str, mock_response: str = MOCK_RESPONSE,
         else:
             # JSONL 处理（Codex / Claude Code）
             if create_backup:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = f"{file_path}.{timestamp}.bak"
-                shutil.copy2(file_path, backup_path)
+                backup_path = create_unique_backup(file_path)
 
             parser = SessionParser(session_format=session_format)
             lines = parser.parse_session_jsonl(file_path)
@@ -631,28 +639,25 @@ def patch_session(file_path: str, mock_response: str = MOCK_RESPONSE,
 
 def load_settings() -> Settings:
     """加载设置"""
-    if os.path.exists(DEFAULT_CONFIG_FILE):
-        try:
-            with open(DEFAULT_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return Settings.model_validate(data)
-        except Exception:
-            logger.warning("加载配置文件失败: %s", DEFAULT_CONFIG_FILE, exc_info=True)
-    return Settings()
+    try:
+        return Settings.model_validate(_load_raw_config())
+    except Exception:
+        logger.warning("加载配置文件失败: %s", DEFAULT_CONFIG_FILE, exc_info=True)
+        return Settings()
 
 
 def save_settings(settings: Settings) -> bool:
     """保存设置（保留非 Settings 字段如 ctf_prompts）"""
     try:
-        config_dir = os.path.dirname(DEFAULT_CONFIG_FILE)
-        os.makedirs(config_dir, exist_ok=True)
-        os.chmod(config_dir, 0o700)
         # 读取现有配置以保留额外字段
         existing = _load_raw_config()
-        existing.update(settings.model_dump())
-        with open(DEFAULT_CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(existing, f, ensure_ascii=False, indent=2)
-        os.chmod(DEFAULT_CONFIG_FILE, 0o600)
+        values = settings.model_dump(exclude={"ai_key_configured", "clear_ai_key"})
+        if settings.clear_ai_key:
+            values["ai_key"] = ""
+        elif not settings.ai_key:
+            values["ai_key"] = existing.get("ai_key", "")
+        existing.update(values)
+        _save_raw_config(existing)
         return True
     except Exception:
         logger.warning("保存配置文件失败", exc_info=True)
@@ -1010,7 +1015,12 @@ async def restore_session(session_id: str, backup_filename: str):
         return RestoreResponse(success=False, message="非法的备份路径")
 
     try:
-        shutil.copy2(backup_path, session.path)
+        require_regular_or_missing(backup_path)
+        if session.format == SessionFormatEnum.OPENCODE:
+            OpenCodeDBAdapter(session.path).restore_database(backup_path)
+        else:
+            with open(backup_path, "rb") as stream:
+                atomic_write_bytes(session.path, stream.read())
         _invalidate_session_cache()
         await manager.broadcast(WSMessage(
             type="log",
@@ -1026,7 +1036,12 @@ async def restore_session(session_id: str, backup_filename: str):
 @router.get("/settings", response_model=Settings)
 async def get_settings():
     """获取设置"""
-    return load_settings()
+    settings = load_settings()
+    return settings.model_copy(update={
+        "ai_key": "",
+        "ai_key_configured": bool(settings.ai_key),
+        "clear_ai_key": False,
+    })
 
 
 @router.put("/settings")
@@ -1042,6 +1057,10 @@ async def update_settings(settings: Settings):
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket 连接"""
+    client_host = websocket.client.host if websocket.client else None
+    if not is_loopback_host(client_host) or not is_allowed_origin(websocket.headers.get("origin")):
+        await websocket.close(code=1008, reason="仅允许本机访问")
+        return
     await manager.connect(websocket)
     try:
         while True:
@@ -1173,7 +1192,10 @@ async def install_claude_ctf_config():
     """安装 Claude Code CTF 配置"""
     from codex_session_patcher.ctf_config import ClaudeCodeCTFInstaller
     installer = ClaudeCodeCTFInstaller()
-    success, message = installer.install()
+
+    settings_data = _load_raw_config()
+    custom_prompt = settings_data.get('ctf_prompts', {}).get('claude_code', {}).get('prompt')
+    success, message = installer.install(custom_prompt=custom_prompt)
 
     await manager.broadcast(WSMessage(
         type="log",
@@ -1260,23 +1282,12 @@ async def uninstall_opencode_ctf_config():
 
 def _load_raw_config() -> dict:
     """加载原始配置文件"""
-    if os.path.exists(DEFAULT_CONFIG_FILE):
-        try:
-            with open(DEFAULT_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            logger.warning("加载配置文件失败", exc_info=True)
-    return {}
+    return load_shared_config(DEFAULT_CONFIG_FILE)
 
 
 def _save_raw_config(data: dict):
     """保存原始配置文件"""
-    config_dir = os.path.dirname(DEFAULT_CONFIG_FILE)
-    os.makedirs(config_dir, exist_ok=True)
-    os.chmod(config_dir, 0o700)
-    with open(DEFAULT_CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.chmod(DEFAULT_CONFIG_FILE, 0o600)
+    save_shared_config(data, DEFAULT_CONFIG_FILE)
 
 
 _CTF_PROMPT_PATHS = {
@@ -1299,6 +1310,17 @@ def _get_ctf_prompt_path(tool: str) -> str | None:
 def _get_codex_prompt_path_for_file(filename: str) -> str:
     """根据内置模板文件名得到 Codex prompt 绝对路径"""
     return os.path.join(os.path.expanduser("~/.codex/prompts"), os.path.basename(filename))
+
+
+def _managed_prompt_file_exists(path: Optional[str]) -> bool:
+    """只把带本工具标记的普通文件视为已安装提示词。"""
+    if not path or not os.path.exists(path):
+        return False
+    from codex_session_patcher.ctf_config.status import has_ctf_marker
+
+    require_regular_or_missing(path)
+    with open(path, 'r', encoding='utf-8') as f:
+        return has_ctf_marker(f.read(500))
 
 
 def _unescape_toml_basic_string(value: str) -> str:
@@ -1451,7 +1473,7 @@ async def get_ctf_prompt(tool: str):
                 "is_default": prompt.strip() == default_prompt.strip(),
             }
 
-    is_installed = bool(prompt_path and os.path.exists(prompt_path))
+    is_installed = _managed_prompt_file_exists(prompt_path)
 
     # 已安装：读取实际文件
     if is_installed:
@@ -1487,6 +1509,9 @@ async def save_ctf_prompt(tool: str, body: dict):
     if not prompt:
         raise HTTPException(status_code=400, detail="提示词内容不能为空")
 
+    from codex_session_patcher.ctf_config.status import ensure_ctf_marker
+    managed_prompt = ensure_ctf_marker(prompt)
+
     prompt_path = _get_ctf_prompt_path(tool)
 
     # 查找匹配的内置模板，获取其目标文件名
@@ -1497,19 +1522,20 @@ async def save_ctf_prompt(tool: str, body: dict):
             matched_file = tpl['file']
             break
 
-    should_write_installed = bool(prompt_path and os.path.exists(prompt_path))
+    should_write_installed = _managed_prompt_file_exists(prompt_path)
     if tool == 'codex' and _codex_ctf_config_active():
         if matched_file:
             prompt_path = _get_codex_prompt_path_for_file(matched_file)
-        _sync_codex_prompt_config(prompt, matched_file)
+        from codex_session_patcher.ctf_config.installer import CTFConfigInstaller
+        CTFConfigInstaller()._validate_prompt_target(prompt_path)
+        _sync_codex_prompt_config(managed_prompt, matched_file)
         should_write_installed = bool(prompt_path)
 
     # 已安装：写入对应文件
     if should_write_installed:
         try:
             os.makedirs(os.path.dirname(prompt_path), exist_ok=True)
-            with open(prompt_path, 'w', encoding='utf-8') as f:
-                f.write(prompt)
+            atomic_write_text(prompt_path, managed_prompt)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"写入文件失败: {e}")
 
@@ -1533,11 +1559,12 @@ async def reset_ctf_prompt(tool: str):
 
     default_prompt = _get_default_prompt(tool)
     prompt_path = _get_ctf_prompt_path(tool)
-    should_write_installed = bool(prompt_path and os.path.exists(prompt_path))
+    should_write_installed = _managed_prompt_file_exists(prompt_path)
 
     if tool == 'codex' and _codex_ctf_config_active():
         from codex_session_patcher.ctf_config.installer import CTFConfigInstaller
         prompt_path = _get_codex_prompt_path_for_file(CTFConfigInstaller.DEFAULT_PROMPT_FILE)
+        CTFConfigInstaller()._validate_prompt_target(prompt_path)
         _sync_codex_prompt_config(default_prompt, CTFConfigInstaller.DEFAULT_PROMPT_FILE)
         should_write_installed = True
 
@@ -1545,8 +1572,7 @@ async def reset_ctf_prompt(tool: str):
     if should_write_installed:
         try:
             os.makedirs(os.path.dirname(prompt_path), exist_ok=True)
-            with open(prompt_path, 'w', encoding='utf-8') as f:
-                f.write(default_prompt)
+            atomic_write_text(prompt_path, default_prompt)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"写入文件失败: {e}")
 
@@ -1570,7 +1596,10 @@ async def list_ctf_templates(tool: str):
         raise HTTPException(status_code=400, detail=f"不支持的工具: {tool}")
 
     from codex_session_patcher.ctf_config.templates import BUILTIN_TEMPLATES
-    builtin = [{k: v for k, v in t.items() if k != 'prompt'} | {'builtin': True} for t in BUILTIN_TEMPLATES.get(tool, [])]
+    builtin = [
+        dict({k: v for k, v in t.items() if k != 'prompt'}, builtin=True)
+        for t in BUILTIN_TEMPLATES.get(tool, [])
+    ]
 
     config = _load_raw_config()
     user_templates = config.get('ctf_templates', {}).get(tool, [])

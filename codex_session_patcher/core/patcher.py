@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from .constants import MOCK_RESPONSE
 from .detector import RefusalDetector
 from .formats import SessionFormat, get_format_strategy
+from ..file_ops import atomic_write_text
 
 
 @dataclass
@@ -155,10 +156,14 @@ def clean_session_jsonl(
 def save_session_jsonl(lines: List[Dict[str, Any]], file_path: str) -> None:
     """保存 JSONL 会话数据"""
     try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            for line in lines:
-                line_copy = {k: v for k, v in line.items() if not k.startswith('_')}
-                f.write(json.dumps(line_copy, ensure_ascii=False) + '\n')
+        serialized = []
+        for line in lines:
+            line_copy = {k: v for k, v in line.items() if not k.startswith('_')}
+            serialized.append(json.dumps(line_copy, ensure_ascii=False))
+        content = '\n'.join(serialized)
+        if serialized:
+            content += '\n'
+        atomic_write_text(file_path, content)
     except PermissionError as e:
         raise ValueError(f"写入文件失败，权限不足: {file_path}\n{e}")
     except Exception as e:
