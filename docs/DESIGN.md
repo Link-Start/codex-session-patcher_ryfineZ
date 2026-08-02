@@ -193,6 +193,7 @@ CORS 只允许 `localhost`、`127.0.0.1` 和 `[::1]` 的 HTTP/HTTPS 来源及任
 - Codex、Claude Code、OpenCode 默认提示词作为包数据发布。
 - Web 前端先执行生产构建，再把 `web/frontend/dist` 纳入 wheel 和源码包。
 - 版本号以 `codex_session_patcher.__version__` 为唯一来源，构建脚本读取该值。
+- 支持 Python 3.8 期间，构建后端使用 `setuptools>=75.3.2,<77`；该范围同时兼容 Python 3.8 和当前许可证元数据格式，避免新版 Setuptools 的弃用提示。
 - CI 在全新虚拟环境安装 wheel，不能借助源码目录导入。
 - 前端构建使用锁文件固定依赖。CI 使用 Vite 8 与对应 Vue 插件，Node.js 使用 20.19+（20.x）或 22.12+；发布前运行 `npm audit`，不接受仍有已知高危依赖的构建结果。
 - Naive UI 组件由构建插件按模板实际用量引入，不再注册完整组件库；非当前页签的页面组件使用动态导入，控制首次加载体积。
