@@ -17,7 +17,7 @@ from .core import (
     clean_session_jsonl,
 )
 
-__version__ = "1.4.7"
+__version__ = "1.5.0"
 __all__ = [
     'REFUSAL_KEYWORDS',
     'MOCK_RESPONSE',
