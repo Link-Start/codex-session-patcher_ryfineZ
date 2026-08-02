@@ -206,7 +206,7 @@ def test_pick_python_bin_supports_versioned_interpreter_names(tmp_path: Path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
 
-    for tool in ("awk", "dirname"):
+    for tool in ("awk", "bash", "dirname"):
         link_host_tool(fake_bin, tool)
 
     versioned_python = fake_bin / "python3.13"
@@ -214,7 +214,7 @@ def test_pick_python_bin_supports_versioned_interpreter_names(tmp_path: Path):
 
     result = run_bash(
         f"source {shlex.quote(str(WEB_COMMON))}; web_pick_python_bin",
-        env={"PATH": f"{fake_bin}:/bin"},
+        env={"PATH": str(fake_bin)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -278,7 +278,7 @@ def test_pick_python_bin_supports_py_launcher(tmp_path: Path):
     fake_bin.mkdir()
     state_dir.mkdir()
 
-    for tool in ("awk", "dirname"):
+    for tool in ("awk", "bash", "cat", "chmod", "dirname", "mkdir", "uname"):
         link_host_tool(fake_bin, tool)
 
     py_launcher = fake_bin / "py"
@@ -309,7 +309,7 @@ def test_pick_python_bin_supports_py_launcher(tmp_path: Path):
                 "PY",
             ]
         ),
-        env={"PATH": f"{fake_bin}:/bin"},
+        env={"PATH": str(fake_bin)},
     )
 
     assert result.returncode == 0, result.stderr
