@@ -63,6 +63,9 @@ Codex Session Patcher 是面向 Codex CLI、Claude Code 和 OpenCode 的本地�
 - 默认处理会话中全部已识别拒绝回复，而不是只处理最后一条。
 - Codex 的 `response_item` 与冗余 `event_msg` 必须一致更新。
 - 历史会话只有 `event_msg` 时仍应允许清理。
+- 省略主语的拒绝句式，例如“不能继续做这件事”，必须识别。
+- 桌面端 `event_msg/item_completed` 的 `AgentMessage` 必须与对应 `response_item` 一起替换。
+- 如果存在 `thread_history` 投影，清理必须同步 `thread_items`；会话已完整投影时还要修正投影游标。
 - 用户可以只处理选中记录，也可以关闭推理内容清理。
 - 预览模式不得创建备份或写入任何目标文件。
 
@@ -75,7 +78,8 @@ Codex Session Patcher 是面向 Codex CLI、Claude Code 和 OpenCode 的本地�
 
 ### FR-005：推理内容清理 [P0]
 
-- Codex：删除独立 reasoning 类型记录。
+- Codex：删除独立 reasoning 类型记录，包括 `response_item` 和 `item_completed/Reasoning`。
+- 已投影的 reasoning 记录必须从 `thread_items` 删除，关闭清理选项时不得改动。
 - Claude Code：移除消息 `content` 中的 thinking 块，保留其他内容块。
 - OpenCode：在事务中删除对应 reasoning part。
 - 关闭清理选项时不得修改任何推理内容。

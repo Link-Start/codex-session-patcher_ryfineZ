@@ -20,7 +20,7 @@ from .core import (
     MOCK_RESPONSE,
     OpenCodeDBAdapter,
 )
-from .core.patcher import save_session_jsonl
+from .core.patcher import publish_cleaned_codex_session, save_session_jsonl
 from .core.sqlite_adapter import DEFAULT_OPENCODE_DB
 
 def load_config():
@@ -423,12 +423,22 @@ def main():
             continue
 
         # 创建备份
+        backup_path = None
         if not args.no_backup:
             backup_path = create_unique_backup(session.path)
             print(f'  备份: {backup_path}')
 
-        # 保存修改
-        save_session_jsonl(cleaned_lines, session.path)
+        # 保存修改。Codex 桌面端还要同步 thread_history 投影。
+        if session.format == SessionFormat.CODEX:
+            publish_cleaned_codex_session(
+                session.path,
+                cleaned_lines,
+                changes,
+                old_size=os.path.getsize(session.path),
+                backup_path=backup_path,
+            )
+        else:
+            save_session_jsonl(cleaned_lines, session.path)
         print(f'  已保存修改')
         total_modified += 1
 

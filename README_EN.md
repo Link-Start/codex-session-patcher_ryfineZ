@@ -35,6 +35,7 @@ AI coding tools (Codex, Claude Code, OpenCode) frequently refuse security-relate
 - **Smart Detection** — Two-level refusal detection (strong phrase full-text match + weak keyword prefix match), low false positive rate
 - **AI Rewrite** — Call LLM to generate context-aware replacement responses (supports OpenAI / Ollama / OpenRouter compatible APIs)
 - **Safe Fallbacks** — Clean historical Codex refusals that only contain `event_msg`; fall back to a safe default when AI returns question-mark mojibake
+- **Desktop projection** — Also update `item_completed/AgentMessage` and `thread_history`, so the desktop app does not keep showing a refusal after the JSONL is cleaned
 - **Batch Cleaning** — Process all refusal responses in a session, not just the last one
 - **Reasoning Erasure** — Remove encrypted Reasoning / Thinking block content
 - **Backup & Restore** — Auto-backup before cleaning, one-click restore to any historical version
