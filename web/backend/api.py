@@ -36,7 +36,10 @@ from codex_session_patcher.core import (
     get_reasoning_items,
     MOCK_RESPONSE,
 )
-from codex_session_patcher.core.patcher import clean_session_jsonl, save_session_jsonl
+from codex_session_patcher.core.patcher import (
+    clean_session_jsonl, count_refusal_groups, group_refusal_messages,
+    publish_cleaned_codex_session, save_session_jsonl,
+)
 from codex_session_patcher.core.sqlite_adapter import OpenCodeDBAdapter, DEFAULT_OPENCODE_DB
 from codex_session_patcher.config import (
     DEFAULT_CONFIG_FILE,
@@ -218,7 +221,6 @@ def _to_schema_format(fmt: SessionFormat) -> SessionFormatEnum:
 def check_session_refusal(file_path: str, fmt: SessionFormat = SessionFormat.CODEX) -> tuple[bool, int]:
     """检查会话是否包含拒绝内容"""
     count = 0
-    strategy = get_format_strategy(fmt)
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = []
@@ -231,10 +233,7 @@ def check_session_refusal(file_path: str, fmt: SessionFormat = SessionFormat.COD
                 except json.JSONDecodeError:
                     continue
 
-        for _, msg in strategy.get_assistant_messages(lines):
-            content = strategy.extract_text_content(msg)
-            if content and _detector.detect(content):
-                count += 1
+        count = count_refusal_groups(lines, _detector, fmt)
     except Exception:
         logger.warning("检查会话拒绝状态失败", exc_info=True)
     return count > 0, count
@@ -425,32 +424,15 @@ def preview_session(file_path: str, mock_response: str = MOCK_RESPONSE,
                 continue
 
     # 检测拒绝 & 收集对话摘要
-    assistant_msgs = strategy.get_assistant_messages(parsed_lines)
     refusal_lines = set()
-    # 先收集所有拒绝行（含 event_msg 冗余副本），按内容分组
-    refusal_groups: dict[int, list[int]] = {}  # primary_idx -> [companion_idxs]
-    primary_order: list[int] = []
-    for idx, msg in assistant_msgs:
-        content = strategy.extract_text_content(msg)
-        if not content or not detector.detect(content):
-            continue
-        refusal_lines.add(idx)
-        if msg.get('type') == 'event_msg':
-            # 冗余副本：挂到最近的 primary 下
-            if primary_order and parsed_lines[primary_order[-1]].get('type') != 'event_msg':
-                refusal_groups[primary_order[-1]].append(idx)
-            else:
-                refusal_groups[idx] = []
-                primary_order.append(idx)
-        else:
-            refusal_groups[idx] = []
-            primary_order.append(idx)
-
-    for primary_idx in primary_order:
-        companion_idxs = refusal_groups[primary_idx]
+    groups = group_refusal_messages(parsed_lines, detector, session_format)
+    for group in groups:
+        primary_idx = group["primary"]
+        companion_idxs = group["companions"]
+        refusal_lines.add(primary_idx)
+        refusal_lines.update(companion_idxs)
         all_line_nums = sorted([primary_idx + 1] + [i + 1 for i in companion_idxs])
-        msg = parsed_lines[primary_idx]
-        content = strategy.extract_text_content(msg)
+        content = strategy.extract_text_content(parsed_lines[primary_idx])
         changes.append(ChangeDetail(
             line_num=primary_idx + 1,
             line_nums=all_line_nums,
@@ -604,7 +586,16 @@ def patch_session(file_path: str, mock_response: str = MOCK_RESPONSE,
                     if line_num in replacements:
                         cleaned_lines[idx] = strategy.update_text_content(line, replacements[line_num])
 
-            save_session_jsonl(cleaned_lines, file_path)
+            if session_format == SessionFormat.CODEX:
+                publish_cleaned_codex_session(
+                    file_path,
+                    cleaned_lines,
+                    core_changes,
+                    old_size=os.path.getsize(file_path),
+                    backup_path=backup_path,
+                )
+            else:
+                save_session_jsonl(cleaned_lines, file_path)
 
         # 转换为 API ChangeDetail
         api_changes = []
@@ -1021,6 +1012,9 @@ async def restore_session(session_id: str, backup_filename: str):
         else:
             with open(backup_path, "rb") as stream:
                 atomic_write_bytes(session.path, stream.read())
+            if session.format == SessionFormatEnum.CODEX:
+                from codex_session_patcher.core.thread_history import restore_thread_history_sidecar
+                restore_thread_history_sidecar(backup_path)
         _invalidate_session_cache()
         await manager.broadcast(WSMessage(
             type="log",

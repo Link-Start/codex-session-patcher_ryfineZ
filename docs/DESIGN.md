@@ -69,7 +69,7 @@
 ### 3.3 清理流程
 
 1. 完整解析源会话，解析失败立即结束。
-2. 找出全部拒绝助手消息，Codex 同步关联的 `response_item` 和 `event_msg`。
+2. 找出全部拒绝助手消息，Codex 同步关联的 `response_item`、旧 `event_msg`，以及桌面端 `item_completed/AgentMessage`。已投影到 `thread_history` 的文本和 reasoning 记录一并更新。
 3. 按用户选择替换全部或指定记录。
 4. 按用户选择删除独立 reasoning 或嵌入 thinking 块。
 5. 预览只返回差异；实际修改先创建备份。
